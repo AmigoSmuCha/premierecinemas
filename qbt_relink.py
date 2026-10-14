@@ -117,7 +117,8 @@ LOGIN_FILE = os.path.join(os.path.expanduser("~"), "Desktop", ".QBT_LOGIN")
 
 
 def load_login():
-    """(username, password) saved by an earlier run; None for anything missing."""
+    """(username, password) saved by an earlier run. None for anything not
+    saved; an empty saved password stays "" (some Web UIs accept that)."""
     saved = {}
     try:
         with open(LOGIN_FILE, encoding="utf-8", errors="surrogateescape") as fh:
@@ -127,25 +128,27 @@ def load_login():
                     saved.setdefault(key, value)
     except OSError:
         pass
-    return saved.get("username") or None, saved.get("password") or None
+    return saved.get("username") or None, saved.get("password")
 
 
 def save_login(username, password):
     """Write the login to LOGIN_FILE, readable only by you (mode 600)."""
     os.makedirs(os.path.dirname(LOGIN_FILE), exist_ok=True)
     fd = os.open(LOGIN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # before writing: also tightens a file that was already there
     with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as fh:
         fh.write("# qBittorrent Web UI login for qbt_relink.py. Delete this file to be asked again.\n")
         fh.write(f"username={username}\npassword={password}\n")
-    os.chmod(LOGIN_FILE, 0o600)  # also tighten a file that was already there
 
 
-def ask_login(username=None):
-    """Prompt for the Web UI login (just the password if the username is known)."""
+def ask_login(username=None, password=None, default_username="admin"):
+    """Prompt for whatever part of the Web UI login is still missing."""
+    sys.stdout.flush()  # earlier messages first: getpass writes straight to the terminal
     try:
         if not username:
-            username = input("qBittorrent Web UI username [admin]: ").strip() or "admin"
-        password = getpass.getpass(f"qBittorrent Web UI password for '{username}': ")
+            username = input(f"qBittorrent Web UI username [{default_username}]: ").strip() or default_username
+        if password is None:
+            password = getpass.getpass(f"qBittorrent Web UI password for '{username}': ")
     except (EOFError, KeyboardInterrupt):
         print("\nERROR: no Web UI login given. Run this once in a terminal, "
               "or pass --username and --password.")
@@ -258,13 +261,15 @@ def main():
     # by an earlier run; whatever is still missing gets asked for and saved.
     saved_username, saved_password = load_login()
     username = args.username or saved_username
-    password = args.password or os.environ.get("QBT_PASSWORD")
+    password = args.password or os.environ.get("QBT_PASSWORD") or None
     from_saved = False
-    if not password and saved_password and username == saved_username:
+    if password is None and saved_password is not None and username == saved_username:
         password, from_saved = saved_password, True
-    typed = not (username and password)
+    if password is not None and not username:
+        username = "admin"  # the old default, so runs that only pass a password keep working
+    typed = not username or password is None
     if typed:
-        username, password = ask_login(username)
+        username, password = ask_login(username, password)
 
     while True:
         client = qbittorrentapi.Client(
@@ -277,17 +282,25 @@ def main():
             if not from_saved:
                 print(f"ERROR: login failed: {e}")
                 sys.exit(1)
-            # The saved login stopped working (e.g. a changed password): ask once more
+            # The saved login stopped working (e.g. a changed password): ask once
+            # more, both parts, with the saved username as the suggestion
             print(f"The login saved in {LOGIN_FILE} was rejected ({e}). Please enter it again.")
-            username, password = ask_login(username)
+            username, password = ask_login(default_username=username)
             from_saved, typed = False, True
         except qbittorrentapi.APIConnectionError as e:
             print(f"ERROR: could not connect to {args.host}:{args.port} -- is the Web UI enabled? ({e})")
             sys.exit(1)
 
-    if typed:
-        save_login(username, password)
-        print(f"Login saved to {LOGIN_FILE} for the next runs.\n")
+    # Save what was typed, except when --username picked another user than the
+    # saved one: that override is for this run only.
+    switched_user = args.username and saved_username and args.username != saved_username
+    if typed and not switched_user:
+        try:
+            save_login(username, password)
+            print(f"Login saved to {LOGIN_FILE} for the next runs.\n")
+        except OSError as e:
+            print(f"Note: could not save the login to {LOGIN_FILE} ({e}); "
+                  f"you'll be asked again next time.\n")
 
     print(f"=== qBittorrent relink ({'APPLY' if args.apply else 'DRY-RUN'}) ===")
     print(f"Movies dir : {movies_dir}")

@@ -33,7 +33,7 @@ When `install.sh` would replace something in `~/.local/bin` that it didn't put t
 
 ### Requirements
 
-- Linux with bash 4+, GNU grep (with `-P`) and GNU find
+- Linux with bash 4.4+, GNU grep (with `-P`) and GNU find
 - [VLC](https://www.videolan.org/vlc/) for playback
 - Only for `qbt_relink.py`: Python 3, `pip install qbittorrent-api --break-system-packages`, and the qBittorrent Web UI enabled
 

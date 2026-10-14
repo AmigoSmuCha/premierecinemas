@@ -49,39 +49,61 @@ config_get_dirs() {
   mapfile -t _DIRS < <(grep '^dir=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2-)
 }
 
+# Append a line, never gluing it onto a last line that lacks its newline
+config_append_line() {
+  if [[ -s "$CONFIG_FILE" && -n "$(tail -c1 "$CONFIG_FILE")" ]]; then
+    printf '\n' >>"$CONFIG_FILE"
+  fi
+  printf '%s\n' "$1" >>"$CONFIG_FILE"
+}
+
 config_set() {
   local key="$1" value="$2"
   if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
     sed -i "s|^${key}=.*|${key}=${value}|" "$CONFIG_FILE"
   else
-    printf '%s=%s\n' "$key" "$value" >>"$CONFIG_FILE"
+    config_append_line "${key}=${value}"
   fi
 }
 
+# Is config line $1 a dir= entry for folder $2 (already normalised)? The entry
+# is normalised the same way, so "dir=/x/" and /x are the same folder, but a
+# whole path has to match: /x is not /x2.
+dir_line_is() {
+  [[ "$1" == dir=* && "$(realpath -m -- "${1#dir=}" 2>/dev/null)" == "$2" ]]
+}
+
 config_add_dir() {
-  local path
+  local path line
   path=$(realpath -m "$1")
-  if grep -qxF "dir=${path}" "$CONFIG_FILE" 2>/dev/null; then
-    printf '%bDirectory already in config:%b %s\n' "$YELLOW" "$RESET" "$path"
-    return
-  fi
-  printf 'dir=%s\n' "$path" >>"$CONFIG_FILE"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if dir_line_is "$line" "$path"; then
+      printf '%bDirectory already in config:%b %s\n' "$YELLOW" "$RESET" "$path"
+      return
+    fi
+  done <"$CONFIG_FILE"
+  config_append_line "dir=${path}"
   printf '%b✓ Added:%b %s\n' "$GREEN" "$RESET" "$path"
 }
 
 config_remove_dir() {
-  local path line
+  local path line found=false
   local -a lines
   path=$(realpath -m "$1")
-  if ! grep -qxF "dir=${path}" "$CONFIG_FILE" 2>/dev/null; then
+  mapfile -t lines <"$CONFIG_FILE"
+  for line in "${lines[@]}"; do
+    if dir_line_is "$line" "$path"; then
+      found=true
+    fi
+  done
+  if ! $found; then
     printf '%b✗ Not found in config:%b %s\n' "$RED" "$RESET" "$path"
     return 1
   fi
-  # Rewrite without that exact line. Plain string comparison instead of a sed
+  # Rewrite without those lines. Plain string comparison instead of a sed
   # regex, so paths with . [ ] | & in them match only themselves.
-  mapfile -t lines <"$CONFIG_FILE"
   for line in "${lines[@]}"; do
-    if [[ "$line" != "dir=${path}" ]]; then
+    if ! dir_line_is "$line" "$path"; then
       printf '%s\n' "$line"
     fi
   done >"$CONFIG_FILE"

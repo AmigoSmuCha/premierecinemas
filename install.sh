@@ -121,14 +121,25 @@ config_replace_line() {
 
 # ─── File helpers ─────────────────────────────────────────────────────────────
 
-# Next free backup name for $1: name.bak first, then name.bak01, name.bak02, ...
+# Next backup name for $1: name.bak first, then name.bak01, name.bak02, ...
+# Always one past the highest existing number, so the newest backup has the
+# highest number even after older ones were deleted.
 next_backup() {
-  local candidate="$1.bak" n=1
-  while [[ -e "$candidate" || -L "$candidate" ]]; do
-    candidate="$(printf '%s.bak%02d' "$1" "$n")"
-    n=$((n + 1))
+  local backup n highest=-1
+  if [[ -e "$1.bak" || -L "$1.bak" ]]; then
+    highest=0
+  fi
+  for backup in "$1".bak[0-9]*; do
+    n="${backup##*.bak}"
+    if [[ "$n" =~ ^[0-9]+$ ]] && ((10#$n > highest)); then
+      highest=$((10#$n))
+    fi
   done
-  printf '%s\n' "$candidate"
+  if ((highest < 0)); then
+    printf '%s\n' "$1.bak"
+  else
+    printf '%s.bak%02d\n' "$1" "$((highest + 1))"
+  fi
 }
 
 # Move $1 out of the way under its next backup name
@@ -151,7 +162,8 @@ is_ours() {
   fi
 }
 
-# Store $1's current checksum in the manifest, replacing any older entry
+# Store $1's current checksum in the manifest, replacing any older entry.
+# With "forget" as $2, only drop the entry.
 manifest_record() {
   local path="$1" line
   local -a lines=()
@@ -165,7 +177,9 @@ manifest_record() {
         printf '%s\n' "$line"
       fi
     done
-    sha256sum -- "$path"
+    if [[ "${2-}" != forget ]]; then
+      sha256sum -- "$path"
+    fi
   } >"$MANIFEST"
 }
 
@@ -349,10 +363,15 @@ install_commands() {
 install_art() {
   step "Intro art: $ART_DIR"
 
-  # A link from here to the old place would keep the art living there: make
-  # it a real folder again (the files are moved in below)
-  if [[ -L "$ART_DIR" && "$(realpath -m -- "$ART_DIR")" == "$(realpath -m -- "$OLD_ART_DIR")" ]]; then
-    rm -- "$ART_DIR"
+  # The art belongs in a real folder here. A link that is broken, or points
+  # to the old place or into this git folder, is replaced by one (the files
+  # are moved/copied in below).
+  local target
+  if [[ -L "$ART_DIR" ]]; then
+    target="$(realpath -m -- "$ART_DIR")"
+    if [[ ! -e "$ART_DIR" || "$target" == "$(realpath -m -- "$OLD_ART_DIR")" || "$target" == "$REPO_DIR"/* ]]; then
+      rm -- "$ART_DIR"
+    fi
   fi
   if [[ -e "$ART_DIR" && ! -d "$ART_DIR" ]]; then
     warn "Skipped: $ART_DIR exists but is not a directory"
@@ -361,10 +380,11 @@ install_art() {
   mkdir -p -- "$ART_DIR"
 
   # Files still in the old place move over. A different file of the same name
-  # already here is kept as a backup.
+  # already here is kept as a backup. (Both loops read their file list on fd 3,
+  # so stdin stays free for the questions install_file may ask.)
   local src dst name
   if [[ -d "$OLD_ART_DIR" && ! -L "$OLD_ART_DIR" ]]; then
-    while IFS= read -r -d '' src; do
+    while IFS= read -r -d '' -u 3 src; do
       name="$(basename -- "$src")"
       dst="$ART_DIR/$name"
       if [[ "$src" -ef "$dst" ]]; then
@@ -378,7 +398,7 @@ install_art() {
         mv -- "$src" "$dst"
       fi
       ok "Moved $name over from $OLD_ART_DIR"
-    done < <(find "$OLD_ART_DIR" -mindepth 1 -maxdepth 1 -type f -print0 | sort -z)
+    done 3< <(find "$OLD_ART_DIR" -mindepth 1 -maxdepth 1 -type f -print0 | sort -z)
 
     if rmdir -- "$OLD_ART_DIR" 2>/dev/null; then
       ok "Removed the empty $OLD_ART_DIR"
@@ -389,9 +409,9 @@ install_art() {
 
   # The art that comes with premierecinemas (art/ in this folder)
   if [[ -d "$REPO_DIR/art" ]]; then
-    while IFS= read -r -d '' src; do
+    while IFS= read -r -d '' -u 3 src; do
       install_file "$src" "$ART_DIR/$(basename -- "$src")" 644
-    done < <(find "$REPO_DIR/art" -mindepth 1 -maxdepth 1 -type f -print0 | sort -z)
+    done 3< <(find "$REPO_DIR/art" -mindepth 1 -maxdepth 1 -type f -print0 | sort -z)
   fi
 
   if [[ ! -f "$ART_DIR/intro.txt" ]]; then
@@ -443,6 +463,7 @@ uninstall() {
     dst="$BIN_DIR/$name"
     if is_ours "$dst"; then
       rm -- "$dst"
+      manifest_record "$dst" forget
       ok "Removed $dst"
     elif [[ -e "$dst" || -L "$dst" ]]; then
       warn "Left $dst alone: it was changed after install.sh copied it, or isn't ours"
@@ -455,7 +476,6 @@ uninstall() {
       fi
     done
   done
-  rm -f -- "$MANIFEST"
 
   printf '\n  Kept your settings (%s) and the intro art (%s).\n' "$CONFIG_FILE" "$ART_DIR"
 }
@@ -501,8 +521,8 @@ print_done() {
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
-  if ((BASH_VERSINFO[0] < 4)); then
-    die "bash 4 or newer is needed (this is bash $BASH_VERSION)"
+  if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+    die "bash 4.4 or newer is needed (this is bash $BASH_VERSION)"
   fi
   if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
     die "Run this without sudo: it sets things up in your own home folder"
