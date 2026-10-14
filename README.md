@@ -53,7 +53,7 @@ qbt_relink.py                            # dry run
 qbt_relink.py --apply                    # relink torrents
 ```
 
-The first time, `qbt_relink.py` asks for your qBittorrent Web UI username and password and saves them in `~/Desktop/.QBT_LOGIN` for the next runs. The file is plain text, readable only by you; delete it to be asked again. `--username` / `--password` override it for a single run.
+The first time, `qbt_relink.py` asks for your qBittorrent Web UI username and password and saves them in `~/Desktop/.QBT_LOGIN` for the next runs. The file is plain text, readable only by you; delete it to be asked again. `--username` / `--password` (or `QBT_PASSWORD`) override it for a single run; a password given without any username logs in as `admin`.
 
 ## Configuration
 

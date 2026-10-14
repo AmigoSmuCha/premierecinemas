@@ -66,16 +66,24 @@ config_set() {
   fi
 }
 
-# Is config line $1 a dir= entry for folder $2 (already normalised)? The entry
-# is normalised the same way, so "dir=/x/" and /x are the same folder, but a
-# whole path has to match: /x is not /x2.
+# Is config line $1 a dir= entry for folder $2? An absolute entry is tidied up
+# as text first (no symlinks followed, the search doesn't follow them either),
+# so "dir=/x/" and /x are the same folder, but a whole path has to match: /x is
+# not /x2.
 dir_line_is() {
-  [[ "$1" == dir=* && "$(realpath -m -- "${1#dir=}" 2>/dev/null)" == "$2" ]]
+  local entry="${1#dir=}"
+  if [[ "$1" != dir=* ]]; then
+    return 1
+  fi
+  if [[ "$entry" == /* ]]; then
+    entry="$(realpath -m -s -- "$entry")"
+  fi
+  [[ "$entry" == "$2" ]]
 }
 
 config_add_dir() {
   local path line
-  path=$(realpath -m "$1")
+  path=$(realpath -m -- "$1")
   while IFS= read -r line || [[ -n "$line" ]]; do
     if dir_line_is "$line" "$path"; then
       printf '%bDirectory already in config:%b %s\n' "$YELLOW" "$RESET" "$path"
@@ -89,7 +97,7 @@ config_add_dir() {
 config_remove_dir() {
   local path line found=false
   local -a lines
-  path=$(realpath -m "$1")
+  path=$(realpath -m -- "$1")
   mapfile -t lines <"$CONFIG_FILE"
   for line in "${lines[@]}"; do
     if dir_line_is "$line" "$path"; then

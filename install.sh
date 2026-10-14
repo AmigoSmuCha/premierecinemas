@@ -92,8 +92,44 @@ config_get() {
   grep -m1 "^${1}=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- || true
 }
 
-config_has_line() {
-  grep -qxF -- "$1" "$CONFIG_FILE"
+# Is config line $1 a dir= entry for folder $2? Same rule as premierecinemas:
+# an absolute entry is tidied up as text first (no symlinks followed), so
+# "dir=/x/" and /x are the same folder, but /x is not /x2.
+dir_line_is() {
+  local entry="${1#dir=}"
+  if [[ "$1" != dir=* ]]; then
+    return 1
+  fi
+  if [[ "$entry" == /* ]]; then
+    entry="$(realpath -m -s -- "$entry")"
+  fi
+  [[ "$entry" == "$2" ]]
+}
+
+config_has_dir() {
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if dir_line_is "$line" "$1"; then
+      return 0
+    fi
+  done <"$CONFIG_FILE"
+  return 1
+}
+
+# Replace the dir= entries for folder $1 with a single "dir=$2" (where the
+# first one was), or drop them all when $2 is empty
+config_replace_dir() {
+  local old="$1" new="$2" line written=false
+  local -a lines
+  mapfile -t lines <"$CONFIG_FILE"
+  for line in "${lines[@]}"; do
+    if ! dir_line_is "$line" "$old"; then
+      printf '%s\n' "$line"
+    elif [[ -n "$new" ]] && ! $written; then
+      printf 'dir=%s\n' "$new"
+      written=true
+    fi
+  done >"$CONFIG_FILE"
 }
 
 # Append lines, never gluing onto a last line that lacks its newline
@@ -308,17 +344,20 @@ setup_config() {
 
   # The Movies directory the config pointed at so far. Empty for configs made
   # before movies_dir= existed; then no search directory gets swapped out.
-  local previous
+  local previous previous_dir=""
   previous="$(config_get movies_dir)"
+  if [[ "$previous" == /* ]]; then
+    previous_dir="$(realpath -m -s -- "$previous")" # tidied like dir= entries
+  fi
 
   # dir= is premierecinemas' search list: the new Movies directory takes the
   # previous one's place. Any other search directories stay as they are.
-  if config_has_line "dir=$MOVIES_DIR"; then
-    if [[ -n "$previous" && "$previous" != "$MOVIES_DIR" ]]; then
-      config_replace_line "dir=$previous" ""
+  if config_has_dir "$MOVIES_DIR"; then
+    if [[ -n "$previous_dir" && "$previous_dir" != "$MOVIES_DIR" ]]; then
+      config_replace_dir "$previous_dir" ""
     fi
-  elif [[ -n "$previous" ]] && config_has_line "dir=$previous"; then
-    config_replace_line "dir=$previous" "dir=$MOVIES_DIR"
+  elif [[ -n "$previous_dir" ]] && config_has_dir "$previous_dir"; then
+    config_replace_dir "$previous_dir" "$MOVIES_DIR"
   else
     config_append "dir=$MOVIES_DIR"
   fi

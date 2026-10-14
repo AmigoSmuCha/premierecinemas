@@ -62,7 +62,8 @@
 #   Login: the first run asks for the Web UI username and password and saves
 #   them in ~/Desktop/.QBT_LOGIN (plain text, readable only by you) for the
 #   next runs. Delete that file to be asked again. --username / --password
-#   (or env var QBT_PASSWORD for the password) override it for one run.
+#   (or env var QBT_PASSWORD for the password) override it for one run; a
+#   password given without any username logs in as admin, as before.
 #   --movies-dir defaults to the Movies directory chosen in install.sh
 #   (movies_dir= in ~/.config/premierecinemas/config), else ~/Movies.
 # =============================================================================
@@ -141,12 +142,30 @@ def save_login(username, password):
         fh.write(f"username={username}\npassword={password}\n")
 
 
+def ask_line(prompt):
+    """input() that asks on the terminal, like getpass does, so the question
+    stays visible (and the answer goes to the right place) even when stdout
+    is redirected to a log file."""
+    try:
+        with open("/dev/tty", "r+", encoding="utf-8", errors="surrogateescape") as tty:
+            tty.write(prompt)
+            tty.flush()
+            line = tty.readline()
+    except OSError:  # no terminal at all: fall back to stdin
+        sys.stderr.write(prompt)
+        sys.stderr.flush()
+        return input()
+    if not line:
+        raise EOFError
+    return line.rstrip("\n")
+
+
 def ask_login(username=None, password=None, default_username="admin"):
     """Prompt for whatever part of the Web UI login is still missing."""
-    sys.stdout.flush()  # earlier messages first: getpass writes straight to the terminal
+    sys.stdout.flush()  # earlier messages first: the prompts go straight to the terminal
     try:
         if not username:
-            username = input(f"qBittorrent Web UI username [{default_username}]: ").strip() or default_username
+            username = ask_line(f"qBittorrent Web UI username [{default_username}]: ").strip() or default_username
         if password is None:
             password = getpass.getpass(f"qBittorrent Web UI password for '{username}': ")
     except (EOFError, KeyboardInterrupt):
@@ -230,7 +249,8 @@ def main():
     parser.add_argument("--port", default=8080, type=int, help="Web UI port (default: 8080)")
     parser.add_argument(
         "--username", default=None,
-        help="Web UI username (default: the one saved in ~/Desktop/.QBT_LOGIN, asked on first run)",
+        help="Web UI username (default: the one saved in ~/Desktop/.QBT_LOGIN, asked on first run; "
+             "admin when only a password is given)",
     )
     parser.add_argument(
         "--password", default=None,
@@ -279,12 +299,15 @@ def main():
             client.auth_log_in()
             break
         except qbittorrentapi.LoginFailed as e:
+            reason = str(e) or "wrong username or password"
             if not from_saved:
-                print(f"ERROR: login failed: {e}")
+                print(f"ERROR: login failed: {reason}")
                 sys.exit(1)
             # The saved login stopped working (e.g. a changed password): ask once
-            # more, both parts, with the saved username as the suggestion
-            print(f"The login saved in {LOGIN_FILE} was rejected ({e}). Please enter it again.")
+            # more, both parts, with the saved username as the suggestion. Said on
+            # stderr, next to the questions, in case stdout goes to a log file.
+            print(f"The login saved in {LOGIN_FILE} was rejected ({reason}). Please enter it again.",
+                  file=sys.stderr, flush=True)
             username, password = ask_login(default_username=username)
             from_saved, typed = False, True
         except qbittorrentapi.APIConnectionError as e:
