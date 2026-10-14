@@ -29,6 +29,10 @@ config_init() {
 # Show the Star Wars ASCII intro when playing a video (true/false)
 intro=true
 
+# Your Movies library — the folder organize tidies up (qbt_relink.py uses it too).
+# Change it by re-running install.sh, which also keeps it in the dir= search list.
+movies_dir=$HOME/Movies
+
 # Directories to search for video files (one per line, prefix "dir=")
 dir=$HOME/Movies
 dir=$HOME/Downloads
@@ -221,6 +225,7 @@ print_help() {
   printf '%b%bCONFIG FILE%b\n' "$BOLD" "$CYAN" "$RESET"
   printf '  %b%s%b\n\n' "$DIM" "$CONFIG_FILE" "$RESET"
   printf '  intro=true|false          Toggle the ASCII intro\n'
+  printf '  movies_dir=/path/to/dir   Your Movies library (set by install.sh)\n'
   printf '  dir=/path/to/folder       One line per search directory\n\n'
   printf '%b%bEXAMPLES%b\n' "$BOLD" "$CYAN" "$RESET"
   printf '  premierecinemas interstellar\n'

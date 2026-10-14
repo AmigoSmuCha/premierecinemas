@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# organize_movies.sh
+# organize
 #
-# Reorganizes content under ~/Movies:
+# Reorganizes content under your Movies directory (the one you chose in
+# install.sh, saved as movies_dir= in ~/.config/premierecinemas/config):
 #
 # PHASE 1 — dated movie subdirectories
 #   - Detects movie dirs by the pattern: "Movie Name (YYYY) ..."
@@ -38,18 +39,23 @@
 #   level of Movies/ are considered.
 #
 # Usage:
-#   ./organize_movies.sh [OPTIONS]
+#   organize [OPTIONS]
 #
 # Options:
 #   -d, --dry-run       Print what would happen without making any changes
-#   -m, --movies-dir    Path to movies directory (default: /home/hamilton/Movies)
+#   -m, --movies-dir    Path to movies directory (default: movies_dir from
+#                       ~/.config/premierecinemas/config, else ~/Movies)
 #   -h, --help          Show this help message
 # =============================================================================
 
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-MOVIES_DIR="/home/hamilton/Movies"
+# The Movies directory is shared with premierecinemas: install.sh saves it in
+# the config as movies_dir=. -m/--movies-dir still overrides it for one run.
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/premierecinemas/config"
+MOVIES_DIR="$(grep -m1 '^movies_dir=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- || true)"
+MOVIES_DIR="${MOVIES_DIR:-$HOME/Movies}"
 DRY_RUN=false
 
 # ── Colours ───────────────────────────────────────────────────────────────────
@@ -155,7 +161,8 @@ detect_subtitle_language() {
 
 # ── Argument parsing ───────────────────────────────────────────────────────────
 usage() {
-  grep '^# ' "$0" | sed 's/^# \?//'
+  # Print only the header block at the top of this file (up to its closing rule)
+  sed -n '3,/^# =====/{/^# =====/d;s/^# \?//;p}' "$0"
   exit 0
 }
 

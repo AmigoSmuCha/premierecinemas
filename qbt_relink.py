@@ -60,6 +60,8 @@
 #   python3 qbt_relink.py --username admin --hide --apply --resume-after
 #
 #   Password: --password, env var QBT_PASSWORD, or a hidden prompt.
+#   --movies-dir defaults to the Movies directory chosen in install.sh
+#   (movies_dir= in ~/.config/premierecinemas/config), else ~/Movies.
 # =============================================================================
 
 import argparse
@@ -83,6 +85,28 @@ except ImportError:
 ESSENTIAL_EXTS = {
     "mp4", "mkv", "avi", "mov", "m4v", "wmv", "flv", "webm", "ts", "m2ts", "mpeg", "mpg",
 }
+
+# Shared with premierecinemas and organize; install.sh writes movies_dir= here.
+CONFIG_FILE = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+    "premierecinemas",
+    "config",
+)
+
+
+def configured_movies_dir():
+    """movies_dir= from the premierecinemas config, or ~/Movies if it isn't set."""
+    try:
+        with open(CONFIG_FILE, encoding="utf-8", errors="surrogateescape") as fh:
+            for line in fh:
+                if line.startswith("movies_dir="):
+                    value = line[len("movies_dir="):].rstrip("\n")
+                    if value:
+                        return value
+                    break
+    except OSError:
+        pass
+    return os.path.expanduser("~/Movies")
 
 
 def human_size(n):
@@ -161,8 +185,9 @@ def main():
     parser.add_argument("--password", default=None, help="Web UI password (omit to be prompted)")
     parser.add_argument(
         "--movies-dir",
-        default=os.path.expanduser("~/Movies"),
-        help="Root folder for relinking (default: ~/Movies)",
+        default=configured_movies_dir(),
+        help="Root folder for relinking (default: %(default)s, from movies_dir= in "
+             "the premierecinemas config, else ~/Movies)",
     )
     parser.add_argument("--apply", action="store_true", help="Make changes. Without it, nothing is modified.")
     parser.add_argument("--resume-after", action="store_true", help="Resume processed torrents when done.")
