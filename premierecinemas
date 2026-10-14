@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  premierecinemas — find & play your local videos with a side of the Force
+# =============================================================================
+set -euo pipefail
+
+# ─── Paths ────────────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/premierecinemas"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+# ─── Colours ─────────────────────────────────────────────────────────────────
+RESET=$'\033[0m'
+YELLOW=$'\033[38;5;220m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+CYAN=$'\033[36m'
+GREEN=$'\033[32m'
+RED=$'\033[31m'
+
+# ─── Config ───────────────────────────────────────────────────────────────────
+
+config_init() {
+  mkdir -p "$CONFIG_DIR"
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    cat >"$CONFIG_FILE" <<EOF
+# premierecinemas configuration
+# ─────────────────────────────
+# Show the Star Wars ASCII intro when playing a video (true/false)
+intro=true
+
+# Directories to search for video files (one per line, prefix "dir=")
+dir=$HOME/Movies
+dir=$HOME/Downloads
+EOF
+  fi
+}
+
+config_get() {
+  local key="$1"
+  grep -m1 "^${key}=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- || true
+}
+
+config_get_dirs() {
+  mapfile -t _DIRS < <(grep '^dir=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2-)
+}
+
+config_set() {
+  local key="$1" value="$2"
+  if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$CONFIG_FILE"
+  else
+    printf '%s=%s\n' "$key" "$value" >>"$CONFIG_FILE"
+  fi
+}
+
+config_add_dir() {
+  local path
+  path=$(realpath -m "$1")
+  if grep -qF "dir=${path}" "$CONFIG_FILE" 2>/dev/null; then
+    printf '%bDirectory already in config:%b %s\n' "$YELLOW" "$RESET" "$path"
+    return
+  fi
+  printf 'dir=%s\n' "$path" >>"$CONFIG_FILE"
+  printf '%b✓ Added:%b %s\n' "$GREEN" "$RESET" "$path"
+}
+
+config_remove_dir() {
+  local path
+  path=$(realpath -m "$1")
+  if ! grep -qF "dir=${path}" "$CONFIG_FILE" 2>/dev/null; then
+    printf '%b✗ Not found in config:%b %s\n' "$RED" "$RESET" "$path"
+    return 1
+  fi
+  sed -i "\|^dir=${path}$|d" "$CONFIG_FILE"
+  printf '%b✓ Removed:%b %s\n' "$GREEN" "$RESET" "$path"
+}
+
+# ─── ASCII intro ──────────────────────────────────────────────────────────────
+
+colorize_line() {
+  local line="$1"
+  local result=""
+  local i char
+  local len=${#line}
+  for ((i = 0; i < len; i++)); do
+    char="${line:$i:1}"
+    case "$char" in
+    / | \\ | _ | \| | '>' | '<')
+      result+="${YELLOW}${char}${RESET}"
+      ;;
+    *)
+      result+="${char}"
+      ;;
+    esac
+  done
+  printf '%s\n' "${result}"
+}
+
+print_art() {
+  local art_file="$SCRIPT_DIR/art/intro.txt"
+  [[ -f "$art_file" ]] || return 0
+
+  mapfile -t ART_LINES <"$art_file"
+  local total=${#ART_LINES[@]}
+  local instant=28
+
+  for ((i = 0; i < instant && i < total; i++)); do
+    colorize_line "${ART_LINES[$i]}"
+  done
+  for ((i = instant; i < total; i++)); do
+    sleep 0.2
+    colorize_line "${ART_LINES[$i]}"
+  done
+  printf '\n'
+}
+
+# ─── Fuzzy search ─────────────────────────────────────────────────────────────
+
+# Lower-case only — we keep dots/dashes intact so episode tokens survive matching
+normalize_filename() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# Normalize a query word-list (title words only, no episode tokens)
+normalize_words() {
+  printf '%s' "$1" |
+    tr '[:upper:]' '[:lower:]' |
+    tr '._ -' '    ' |
+    tr -s ' ' |
+    sed 's/^ //;s/ $//'
+}
+
+query_to_pattern() {
+  local raw="$1"
+
+  # Strip shell glob characters — they have no meaning in our regex search
+  raw="${raw//\*/}"
+  raw="${raw//\?/}"
+
+  local season episode ep_num ep_pattern title_part word_pattern final_pattern
+
+  # Extract SxxExx tokens (case-insensitive)
+  season=$(printf '%s' "$raw" | grep -oiP 's\d+' | head -1 | tr '[:upper:]' '[:lower:]')
+  episode=$(printf '%s' "$raw" | grep -oiP 'e\d+' | head -1 | tr '[:upper:]' '[:lower:]')
+  ep_num=$(printf '%s' "$episode" | grep -oP '\d+')
+
+  # Title words = query with the episode token removed
+  title_part=$(printf '%s' "$raw" |
+    sed -E 's/[sS][0-9]+[eE][0-9]*//gi' |
+    sed -E 's/[sS][0-9]+//gi')
+  title_part=$(normalize_words "$title_part")
+
+  # Build episode sub-pattern
+  if [[ -n "$season" && -n "$ep_num" ]]; then
+    # Strip leading zeros for arithmetic comparison, then rebuild pattern
+    local ep_n=$((10#$ep_num))
+    # Direct match: SxxEyy (standalone or range-start)
+    local ep_direct="${season}e0*${ep_n}([^0-9]|$)"
+    # Range-end match: SxxEaa-Eyy (ep is the trailing episode in a multi-ep file)
+    local ep_range_end="${season}e[0-9]+-e0*${ep_n}([^0-9]|$)"
+    ep_pattern="(${ep_direct}|${ep_range_end})"
+  elif [[ -n "$season" ]]; then
+    ep_pattern="${season}([^0-9]|$)"
+  else
+    ep_pattern=""
+  fi
+
+  # Build title word sub-pattern (fuzzy separators)
+  if [[ -n "$title_part" ]]; then
+    word_pattern=$(printf '%s' "$title_part" | sed 's/ /[._ (),-]*/g')
+  else
+    word_pattern=""
+  fi
+
+  # Combine with lookaheads so both must be present
+  if [[ -n "$ep_pattern" && -n "$word_pattern" ]]; then
+    final_pattern="(?=.*${word_pattern})(?=.*${ep_pattern}).*"
+  elif [[ -n "$ep_pattern" ]]; then
+    final_pattern="${ep_pattern}"
+  elif [[ -n "$word_pattern" ]]; then
+    final_pattern="${word_pattern}"
+  else
+    final_pattern=".*"
+  fi
+
+  printf '%s' "$final_pattern"
+}
+
+# ─── Help ─────────────────────────────────────────────────────────────────────
+
+print_help() {
+  printf '%b%bpremierecinemas%b — your personal galaxy of films\n\n' "$BOLD" "$YELLOW" "$RESET"
+  printf '  A minimal command-line video launcher that searches your local\n'
+  printf '  directories for video files and opens them straight in VLC —\n'
+  printf '  with a small Star Wars flavoured intro along the way.\n\n'
+  printf '  Filenames are matched fuzzily: spaces, dots, dashes and underscores\n'
+  printf '  are all treated as equivalent, and the search is case-insensitive.\n'
+  printf '  Typing just a few words is enough:\n\n'
+  printf '    %bpremierecinemas bruce%b          → plays Bruce.Almighty.(2003).mkv\n' "$CYAN" "$RESET"
+  printf '    %bpremierecinemas "breaking bad s02"%b → queues every S02 episode\n\n' "$CYAN" "$RESET"
+  printf '%b%bUSAGE%b\n' "$BOLD" "$CYAN" "$RESET"
+  printf '  premierecinemas [OPTIONS] [TITLE]\n\n'
+  printf '%b%bOPTIONS%b\n' "$BOLD" "$CYAN" "$RESET"
+  printf '  %bTITLE%b\n' "$GREEN" "$RESET"
+  printf '        Fuzzy search term. Quotes optional.\n\n'
+  printf '  %b-h, --help%b\n' "$GREEN" "$RESET"
+  printf '        Show this help and exit.\n\n'
+  printf '  %b--intro-on%b\n' "$GREEN" "$RESET"
+  printf '        Enable the ASCII intro on launch (default).\n\n'
+  printf '  %b--intro-off%b\n' "$GREEN" "$RESET"
+  printf '        Disable the ASCII intro.\n\n'
+  printf '  %b--add-directory PATH%b\n' "$GREEN" "$RESET"
+  printf '        Add a directory to the search list.\n\n'
+  printf '  %b--remove-directory PATH%b\n' "$GREEN" "$RESET"
+  printf '        Remove a directory from the search list.\n\n'
+  printf '  %b--list-directories%b\n' "$GREEN" "$RESET"
+  printf '        Show all currently configured search directories.\n\n'
+  printf '  %b--config%b\n' "$GREEN" "$RESET"
+  printf '        Print the config file path and its current contents.\n\n'
+  printf '%b%bCONFIG FILE%b\n' "$BOLD" "$CYAN" "$RESET"
+  printf '  %b%s%b\n\n' "$DIM" "$CONFIG_FILE" "$RESET"
+  printf '  intro=true|false          Toggle the ASCII intro\n'
+  printf '  dir=/path/to/folder       One line per search directory\n\n'
+  printf '%b%bEXAMPLES%b\n' "$BOLD" "$CYAN" "$RESET"
+  printf '  premierecinemas interstellar\n'
+  printf '  premierecinemas "The Office S03"\n'
+  printf '  premierecinemas --add-directory ~/TV\n'
+  printf '  premierecinemas --remove-directory ~/Downloads\n'
+  printf '  premierecinemas --intro-off\n\n'
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+main() {
+  config_init
+
+  if [[ $# -eq 0 ]]; then
+    print_help
+    exit 0
+  fi
+
+  case "$1" in
+  -h | --help)
+    print_help
+    exit 0
+    ;;
+  --intro-on)
+    config_set intro true
+    printf '%b✓ Intro enabled%b\n' "$GREEN" "$RESET"
+    exit 0
+    ;;
+  --intro-off)
+    config_set intro false
+    printf '%b✓ Intro disabled%b\n' "$GREEN" "$RESET"
+    exit 0
+    ;;
+  --add-directory)
+    [[ -n "${2-}" ]] || {
+      printf '%bError: --add-directory requires a path%b\n' "$RED" "$RESET"
+      exit 1
+    }
+    config_add_dir "$2"
+    exit 0
+    ;;
+  --remove-directory)
+    [[ -n "${2-}" ]] || {
+      printf '%bError: --remove-directory requires a path%b\n' "$RED" "$RESET"
+      exit 1
+    }
+    config_remove_dir "$2"
+    exit 0
+    ;;
+  --list-directories)
+    config_get_dirs
+    if [[ ${#_DIRS[@]} -eq 0 ]]; then
+      printf 'No directories configured.\n'
+    else
+      printf '%b%bConfigured search directories:%b\n' "$BOLD" "$CYAN" "$RESET"
+      for d in "${_DIRS[@]}"; do
+        printf '  %b▸%b %s\n' "$YELLOW" "$RESET" "$d"
+      done
+    fi
+    exit 0
+    ;;
+  --config)
+    printf '%b%bConfig file:%b %s\n\n' "$BOLD" "$CYAN" "$RESET" "$CONFIG_FILE"
+    cat "$CONFIG_FILE"
+    exit 0
+    ;;
+  --*)
+    printf '%bUnknown option:%b %s\n' "$RED" "$RESET" "$1"
+    printf 'Run %bpremierecinemas --help%b for usage.\n' "$BOLD" "$RESET"
+    exit 1
+    ;;
+  esac
+
+  # ── Search ────────────────────────────────────────────────────────────────
+  local query="$*"
+  local pattern
+  pattern=$(query_to_pattern "$query")
+
+  config_get_dirs
+  local -a matches=()
+  local ext_pattern='\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|vob|3gp|ogv|rm|rmvb|divx)$'
+
+  for dir in "${_DIRS[@]}"; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r -d '' file; do
+      local bname norm_base
+      bname=$(basename "$file")
+      norm_base=$(normalize_filename "$bname")
+      if printf '%s' "$norm_base" | grep -qiP "$pattern"; then
+        matches+=("$file")
+      fi
+    done < <(find "$dir" -type f -regextype posix-extended \
+      -iregex ".*${ext_pattern}" -print0 2>/dev/null)
+  done
+
+  if [[ ${#matches[@]} -eq 0 ]]; then
+    printf '%bNo matches found for "%s"%b\n' "$RED" "$query" "$RESET"
+    exit 1
+  fi
+
+  # ── Sort matches alphabetically before passing to VLC ────────────────────
+  mapfile -t matches < <(printf '%s
+' "${matches[@]}" | sort)
+
+  # ── Launch VLC (fire and forget) ──────────────────────────────────────────
+  vlc --started-from-file "${matches[@]}" &
+  disown
+
+  # ── Intro ─────────────────────────────────────────────────────────────────
+  local intro
+  intro=$(config_get intro)
+  if [[ "${intro}" != "false" ]]; then
+    print_art
+  fi
+}
+
+main "$@"
