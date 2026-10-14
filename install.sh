@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  install.sh — one-step setup for premierecinemas and organize
+#  install.sh — one-step setup for premierecinemas, organize and qbt_relink.py
 # =============================================================================
 #  1. Checks the tools the scripts rely on (VLC, GNU grep/find, ...)
 #  2. Asks where your Movies directory is and saves it in the shared config
 #     (~/.config/premierecinemas/config): premierecinemas plays from it,
-#     organize (and qbt_relink.py) work on it
-#  3. Links premierecinemas and organize into ~/.local/bin (symlinks, so a
-#     git pull in this folder updates the installed commands too)
-#  4. Puts ~/.local/bin on your PATH if it isn't there yet
+#     organize and qbt_relink.py work on it
+#  3. Copies premierecinemas, organize and qbt_relink.py into ~/.local/bin,
+#     so they keep working without this git folder
+#  4. Keeps the intro art in one place, ~/.local/bin/art (files still in
+#     ~/.local/lib/art are moved over)
+#  5. Puts ~/.local/bin on your PATH if it isn't there yet
 #
-#  Safe to re-run, e.g. to switch everything to a different Movies directory.
+#  Safe to re-run: after a git pull it updates the installed copies, and it
+#  can switch everything to a different Movies directory. Anything it would
+#  replace that it didn't install itself is kept as name.bak, name.bak01, ...
 # =============================================================================
 
 # Everything below is bash — stop early if started with sh/dash
@@ -23,10 +27,21 @@ set -euo pipefail
 # ─── Paths ────────────────────────────────────────────────────────────────────
 REPO_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
-CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/premierecinemas/config"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/premierecinemas"
+CONFIG_FILE="$CONFIG_DIR/config"
 
-# Scripts that get linked into $BIN_DIR
-COMMANDS=(premierecinemas organize)
+# Scripts that get copied into $BIN_DIR
+COMMANDS=(premierecinemas organize qbt_relink.py)
+
+# premierecinemas reads its intro from art/ next to itself. Older setups kept
+# that folder in ~/.local/lib; its files get moved over from there.
+ART_DIR="$BIN_DIR/art"
+OLD_ART_DIR="$HOME/.local/lib/art"
+
+# Checksums of the files install.sh copied into $BIN_DIR. A re-run uses them
+# to tell its own unchanged copies (simply updated) from anything else (backed
+# up first).
+MANIFEST="$CONFIG_DIR/installed.sha256"
 
 # Appended to your shell's rc file when $BIN_DIR is missing from PATH
 PATH_MARKER="# Added by premierecinemas install.sh"
@@ -104,6 +119,90 @@ config_replace_line() {
   done >"$CONFIG_FILE"
 }
 
+# ─── File helpers ─────────────────────────────────────────────────────────────
+
+# Next free backup name for $1: name.bak first, then name.bak01, name.bak02, ...
+next_backup() {
+  local candidate="$1.bak" n=1
+  while [[ -e "$candidate" || -L "$candidate" ]]; do
+    candidate="$(printf '%s.bak%02d' "$1" "$n")"
+    n=$((n + 1))
+  done
+  printf '%s\n' "$candidate"
+}
+
+# Move $1 out of the way under its next backup name
+back_up() {
+  local backup
+  backup="$(next_backup "$1")"
+  mv -- "$1" "$backup"
+  ok "Backed up the old $(basename -- "$1") as $(basename -- "$backup")"
+}
+
+# Did install.sh put $1 there, unchanged since? Either a copy whose checksum
+# is in the manifest, or a symlink into this folder (the earlier setup).
+is_ours() {
+  if [[ -L "$1" ]]; then
+    [[ "$(realpath -m -- "$1")" == "$REPO_DIR"/* ]]
+  elif [[ -f "$1" && -f "$MANIFEST" ]]; then
+    grep -qxF -- "$(sha256sum -- "$1")" "$MANIFEST"
+  else
+    return 1
+  fi
+}
+
+# Store $1's current checksum in the manifest, replacing any older entry
+manifest_record() {
+  local path="$1" line
+  local -a lines=()
+  if [[ -f "$MANIFEST" ]]; then
+    mapfile -t lines <"$MANIFEST"
+  fi
+  mkdir -p -- "$CONFIG_DIR"
+  {
+    for line in "${lines[@]}"; do
+      if [[ "${line#*  }" != "$path" ]]; then
+        printf '%s\n' "$line"
+      fi
+    done
+    sha256sum -- "$path"
+  } >"$MANIFEST"
+}
+
+# Copy $1 to $2 with mode $3. Already identical: nothing to do. Our own
+# unchanged earlier copy (or old symlink): updated in place. Anything else is
+# only replaced after asking, and kept as a backup.
+install_file() {
+  local src="$1" dst="$2" mode="$3" name="${2#"$BIN_DIR/"}" status
+  if [[ -f "$dst" && ! -L "$dst" ]] && cmp -s -- "$src" "$dst"; then
+    chmod "$mode" -- "$dst"
+    manifest_record "$dst"
+    ok "$name (up to date)"
+    return
+  fi
+
+  if [[ ! -e "$dst" && ! -L "$dst" ]]; then
+    status="installed"
+  elif [[ -L "$dst" && ! -e "$dst" ]] || is_ours "$dst"; then
+    status="updated" # our earlier copy or link, or a dangling link
+  elif [[ -d "$dst" && ! -L "$dst" ]]; then
+    warn "Skipped $name: $dst is a directory"
+    return
+  elif ask "$dst already exists. Replace it? (the old one is kept as a backup)"; then
+    back_up "$dst"
+    status="installed"
+  else
+    warn "Skipped $name: kept the existing $dst"
+    return
+  fi
+
+  rm -f -- "$dst"
+  cp -- "$src" "$dst"
+  chmod "$mode" -- "$dst"
+  manifest_record "$dst"
+  ok "$name ($status)"
+}
+
 # ─── Steps ────────────────────────────────────────────────────────────────────
 
 check_requirements() {
@@ -133,10 +232,6 @@ check_requirements() {
     ok "python3 + qbittorrent-api (for qbt_relink.py)"
   else
     note "Optional, only for qbt_relink.py: pip install qbittorrent-api --break-system-packages"
-  fi
-
-  if [[ ! -f "$REPO_DIR/art/intro.txt" ]]; then
-    note "No art/intro.txt here, so premierecinemas skips its intro until you add one"
   fi
 }
 
@@ -245,36 +340,63 @@ install_commands() {
   step "Commands: $BIN_DIR"
   mkdir -p -- "$BIN_DIR"
 
-  local name src dst backup
+  local name
   for name in "${COMMANDS[@]}"; do
-    src="$REPO_DIR/$name"
-    dst="$BIN_DIR/$name"
-    chmod +x -- "$src"
-
-    if [[ -L "$dst" && "$(realpath -m -- "$dst")" == "$src" ]]; then
-      ok "$name (already linked)"
-      continue
-    elif [[ -d "$dst" && ! -L "$dst" ]]; then
-      warn "Skipped $name: $dst is a directory"
-      continue
-    elif [[ -e "$dst" ]]; then
-      # An older copy of the script, or another program with the same name.
-      # (A dangling symlink, e.g. into a moved clone, is simply replaced.)
-      if ! ask "$dst already exists. Replace it? (the old one is kept as a backup)"; then
-        warn "Skipped $name: kept the existing $dst"
-        continue
-      fi
-      backup="$dst.bak"
-      if [[ -e "$backup" || -L "$backup" ]]; then
-        backup="$dst.bak.$(date +%Y%m%d%H%M%S)"
-      fi
-      mv -- "$dst" "$backup"
-      ok "Moved the old $name to $backup"
-    fi
-
-    ln -sfn -- "$src" "$dst"
-    ok "$name → $src"
+    install_file "$REPO_DIR/$name" "$BIN_DIR/$name" 755
   done
+}
+
+install_art() {
+  step "Intro art: $ART_DIR"
+
+  # A link from here to the old place would keep the art living there: make
+  # it a real folder again (the files are moved in below)
+  if [[ -L "$ART_DIR" && "$(realpath -m -- "$ART_DIR")" == "$(realpath -m -- "$OLD_ART_DIR")" ]]; then
+    rm -- "$ART_DIR"
+  fi
+  if [[ -e "$ART_DIR" && ! -d "$ART_DIR" ]]; then
+    warn "Skipped: $ART_DIR exists but is not a directory"
+    return
+  fi
+  mkdir -p -- "$ART_DIR"
+
+  # Files still in the old place move over. A different file of the same name
+  # already here is kept as a backup.
+  local src dst name
+  if [[ -d "$OLD_ART_DIR" && ! -L "$OLD_ART_DIR" ]]; then
+    while IFS= read -r -d '' src; do
+      name="$(basename -- "$src")"
+      dst="$ART_DIR/$name"
+      if [[ "$src" -ef "$dst" ]]; then
+        continue # the very same file (linked folders), nothing to move
+      elif [[ -f "$dst" && ! -L "$dst" ]] && cmp -s -- "$src" "$dst"; then
+        rm -- "$src"
+      else
+        if [[ -e "$dst" || -L "$dst" ]]; then
+          back_up "$dst"
+        fi
+        mv -- "$src" "$dst"
+      fi
+      ok "Moved $name over from $OLD_ART_DIR"
+    done < <(find "$OLD_ART_DIR" -mindepth 1 -maxdepth 1 -type f -print0 | sort -z)
+
+    if rmdir -- "$OLD_ART_DIR" 2>/dev/null; then
+      ok "Removed the empty $OLD_ART_DIR"
+    else
+      note "$OLD_ART_DIR still has other things in it, so it stays"
+    fi
+  fi
+
+  # The art that comes with premierecinemas (art/ in this folder)
+  if [[ -d "$REPO_DIR/art" ]]; then
+    while IFS= read -r -d '' src; do
+      install_file "$src" "$ART_DIR/$(basename -- "$src")" 644
+    done < <(find "$REPO_DIR/art" -mindepth 1 -maxdepth 1 -type f -print0 | sort -z)
+  fi
+
+  if [[ ! -f "$ART_DIR/intro.txt" ]]; then
+    note "No intro.txt here yet, so premierecinemas skips its intro until you add one"
+  fi
 }
 
 ensure_path() {
@@ -282,6 +404,14 @@ ensure_path() {
 
   if [[ ":$PATH:" == *":$BIN_DIR:"* ]]; then
     ok "$BIN_DIR is on your PATH"
+    # A same-named command earlier in PATH would win over ours
+    local name found
+    for name in "${COMMANDS[@]}"; do
+      found="$(type -P "$name" || true)"
+      if [[ -n "$found" && "$found" != "$BIN_DIR/$name" ]]; then
+        warn "\"$name\" runs $found instead: that folder comes before $BIN_DIR in your PATH"
+      fi
+    done
     return
   fi
 
@@ -306,34 +436,38 @@ ensure_path() {
 }
 
 uninstall() {
-  step "Removing commands from $BIN_DIR"
+  step "Removing the commands from $BIN_DIR"
 
-  local name dst
+  local name dst backup
   for name in "${COMMANDS[@]}"; do
     dst="$BIN_DIR/$name"
-    if [[ -L "$dst" && "$(realpath -m -- "$dst")" == "$REPO_DIR/$name" ]]; then
+    if is_ours "$dst"; then
       rm -- "$dst"
       ok "Removed $dst"
     elif [[ -e "$dst" || -L "$dst" ]]; then
-      warn "Left $dst alone: it isn't a link to this folder"
+      warn "Left $dst alone: it was changed after install.sh copied it, or isn't ours"
     else
       ok "$name wasn't installed"
     fi
-    if [[ -e "$dst.bak" || -L "$dst.bak" ]]; then
-      note "Your previous $name is still at $dst.bak, rename it back if you want it"
-    fi
+    for backup in "$dst".bak*; do
+      if [[ -e "$backup" || -L "$backup" ]]; then
+        note "Backup of an earlier $name: $backup"
+      fi
+    done
   done
+  rm -f -- "$MANIFEST"
 
-  printf '\n  Your settings are kept in %s (delete it to start fresh).\n' "$CONFIG_FILE"
+  printf '\n  Kept your settings (%s) and the intro art (%s).\n' "$CONFIG_FILE" "$ART_DIR"
 }
 
 # ─── Help / summary ───────────────────────────────────────────────────────────
 
 print_help() {
-  printf '%b%binstall.sh%b — set up premierecinemas and organize\n\n' "$BOLD" "$YELLOW" "$RESET"
+  printf '%b%binstall.sh%b — set up premierecinemas, organize and qbt_relink.py\n\n' "$BOLD" "$YELLOW" "$RESET"
   printf '  Asks for your Movies directory and saves it to the shared config,\n'
-  printf '  links premierecinemas and organize into %s and makes sure\n' "$BIN_DIR"
-  printf '  that folder is on your PATH. Safe to re-run any time.\n\n'
+  printf '  copies the three commands and the intro art into %s\n' "$BIN_DIR"
+  printf '  and makes sure that folder is on your PATH. Safe to re-run any time,\n'
+  printf '  e.g. after a git pull to update the installed copies.\n\n'
   printf '%b%bUSAGE%b\n' "$BOLD" "$CYAN" "$RESET"
   printf '  ./install.sh [OPTIONS]\n\n'
   printf '%b%bOPTIONS%b\n' "$BOLD" "$CYAN" "$RESET"
@@ -342,7 +476,7 @@ print_help() {
   printf '  %b-y, --yes%b\n' "$GREEN" "$RESET"
   printf '        Answer every question with its default (no prompts).\n\n'
   printf '  %b--uninstall%b\n' "$GREEN" "$RESET"
-  printf '        Remove the commands from %s (your config is kept).\n\n' "$BIN_DIR"
+  printf '        Remove the commands from %s (config and art are kept).\n\n' "$BIN_DIR"
   printf '  %b-h, --help%b\n' "$GREEN" "$RESET"
   printf '        Show this help and exit.\n\n'
   printf '%b%bCONFIG FILE%b\n' "$BOLD" "$CYAN" "$RESET"
@@ -358,8 +492,10 @@ print_done() {
   esac
   printf '  %bpremierecinemas interstellar%b   find a movie and play it\n' "$CYAN" "$RESET"
   printf '  %borganize --dry-run%b             preview how organize would tidy %s\n' "$CYAN" "$RESET" "$MOVIES_DIR"
-  printf '  %borganize%b                       tidy it for real\n\n' "$CYAN" "$RESET"
-  printf '  Re-run %s any time to switch to a different Movies directory.\n' "$REPO_DIR/install.sh"
+  printf '  %borganize%b                       tidy it for real\n' "$CYAN" "$RESET"
+  printf '  %bqbt_relink.py%b                  then check qBittorrent (asks for its login once)\n\n' "$CYAN" "$RESET"
+  printf '  The commands no longer need this folder. Re-run %s after a\n' "$REPO_DIR/install.sh"
+  printf '  git pull to update them, or to switch to a different Movies directory.\n'
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -402,6 +538,7 @@ main() {
   choose_movies_dir
   setup_config
   install_commands
+  install_art
   ensure_path
   print_done
 }

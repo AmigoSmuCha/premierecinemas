@@ -578,4 +578,6 @@ echo -e "  Phase 2 — episodes moved to show dir : ${GREEN}${loose_moved}${RESE
 echo -e "  Phase 2 — renamed, no show dir found : ${GREEN}${loose_renamed}${RESET}"
 echo -e "  Phase 2 — already correctly named    : ${CYAN}${loose_already_ok}${RESET}"
 echo -e "  Phase 2 — could not classify         : ${YELLOW}${loose_unclassified}${RESET}"
-$DRY_RUN && echo -e "\n${YELLOW}Dry-run complete. Run without -d to apply changes.${RESET}"
+if $DRY_RUN; then
+  echo -e "\n${YELLOW}Dry-run complete. Run without -d to apply changes.${RESET}"
+fi

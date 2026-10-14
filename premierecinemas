@@ -61,7 +61,7 @@ config_set() {
 config_add_dir() {
   local path
   path=$(realpath -m "$1")
-  if grep -qF "dir=${path}" "$CONFIG_FILE" 2>/dev/null; then
+  if grep -qxF "dir=${path}" "$CONFIG_FILE" 2>/dev/null; then
     printf '%bDirectory already in config:%b %s\n' "$YELLOW" "$RESET" "$path"
     return
   fi
@@ -70,13 +70,21 @@ config_add_dir() {
 }
 
 config_remove_dir() {
-  local path
+  local path line
+  local -a lines
   path=$(realpath -m "$1")
-  if ! grep -qF "dir=${path}" "$CONFIG_FILE" 2>/dev/null; then
+  if ! grep -qxF "dir=${path}" "$CONFIG_FILE" 2>/dev/null; then
     printf '%b✗ Not found in config:%b %s\n' "$RED" "$RESET" "$path"
     return 1
   fi
-  sed -i "\|^dir=${path}$|d" "$CONFIG_FILE"
+  # Rewrite without that exact line. Plain string comparison instead of a sed
+  # regex, so paths with . [ ] | & in them match only themselves.
+  mapfile -t lines <"$CONFIG_FILE"
+  for line in "${lines[@]}"; do
+    if [[ "$line" != "dir=${path}" ]]; then
+      printf '%s\n' "$line"
+    fi
+  done >"$CONFIG_FILE"
   printf '%b✓ Removed:%b %s\n' "$GREEN" "$RESET" "$path"
 }
 

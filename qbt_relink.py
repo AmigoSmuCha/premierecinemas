@@ -54,12 +54,15 @@
 #   qBittorrent Web UI enabled (Tools/Options -> Web UI)
 #
 # USAGE
-#   python3 qbt_relink.py --username admin                  # dry run
-#   python3 qbt_relink.py --username admin --apply          # fix
-#   python3 qbt_relink.py --username admin --hide           # dry run of hiding
-#   python3 qbt_relink.py --username admin --hide --apply --resume-after
+#   qbt_relink.py                                   # dry run
+#   qbt_relink.py --apply                           # fix
+#   qbt_relink.py --hide                            # dry run of hiding
+#   qbt_relink.py --hide --apply --resume-after
 #
-#   Password: --password, env var QBT_PASSWORD, or a hidden prompt.
+#   Login: the first run asks for the Web UI username and password and saves
+#   them in ~/Desktop/.QBT_LOGIN (plain text, readable only by you) for the
+#   next runs. Delete that file to be asked again. --username / --password
+#   (or env var QBT_PASSWORD for the password) override it for one run.
 #   --movies-dir defaults to the Movies directory chosen in install.sh
 #   (movies_dir= in ~/.config/premierecinemas/config), else ~/Movies.
 # =============================================================================
@@ -107,6 +110,47 @@ def configured_movies_dir():
     except OSError:
         pass
     return os.path.expanduser("~/Movies")
+
+
+# The Web UI login is asked for once and kept here for the next runs.
+LOGIN_FILE = os.path.join(os.path.expanduser("~"), "Desktop", ".QBT_LOGIN")
+
+
+def load_login():
+    """(username, password) saved by an earlier run; None for anything missing."""
+    saved = {}
+    try:
+        with open(LOGIN_FILE, encoding="utf-8", errors="surrogateescape") as fh:
+            for line in fh:
+                key, sep, value = line.rstrip("\n").partition("=")
+                if sep and not key.startswith("#"):
+                    saved.setdefault(key, value)
+    except OSError:
+        pass
+    return saved.get("username") or None, saved.get("password") or None
+
+
+def save_login(username, password):
+    """Write the login to LOGIN_FILE, readable only by you (mode 600)."""
+    os.makedirs(os.path.dirname(LOGIN_FILE), exist_ok=True)
+    fd = os.open(LOGIN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        fh.write("# qBittorrent Web UI login for qbt_relink.py. Delete this file to be asked again.\n")
+        fh.write(f"username={username}\npassword={password}\n")
+    os.chmod(LOGIN_FILE, 0o600)  # also tighten a file that was already there
+
+
+def ask_login(username=None):
+    """Prompt for the Web UI login (just the password if the username is known)."""
+    try:
+        if not username:
+            username = input("qBittorrent Web UI username [admin]: ").strip() or "admin"
+        password = getpass.getpass(f"qBittorrent Web UI password for '{username}': ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nERROR: no Web UI login given. Run this once in a terminal, "
+              "or pass --username and --password.")
+        sys.exit(1)
+    return username, password
 
 
 def human_size(n):
@@ -181,8 +225,14 @@ def main():
     )
     parser.add_argument("--host", default="localhost", help="Web UI host (default: localhost)")
     parser.add_argument("--port", default=8080, type=int, help="Web UI port (default: 8080)")
-    parser.add_argument("--username", default="admin", help="Web UI username (default: admin)")
-    parser.add_argument("--password", default=None, help="Web UI password (omit to be prompted)")
+    parser.add_argument(
+        "--username", default=None,
+        help="Web UI username (default: the one saved in ~/Desktop/.QBT_LOGIN, asked on first run)",
+    )
+    parser.add_argument(
+        "--password", default=None,
+        help="Web UI password (default: env QBT_PASSWORD, else the saved one, asked on first run)",
+    )
     parser.add_argument(
         "--movies-dir",
         default=configured_movies_dir(),
@@ -204,21 +254,40 @@ def main():
         sys.exit(1)
     hide_dir = os.path.join(movies_dir, ".torrents")
 
+    # Login: --username/--password (or QBT_PASSWORD) win, then the login saved
+    # by an earlier run; whatever is still missing gets asked for and saved.
+    saved_username, saved_password = load_login()
+    username = args.username or saved_username
     password = args.password or os.environ.get("QBT_PASSWORD")
-    if not password:
-        password = getpass.getpass(f"qBittorrent Web UI password for '{args.username}': ")
+    from_saved = False
+    if not password and saved_password and username == saved_username:
+        password, from_saved = saved_password, True
+    typed = not (username and password)
+    if typed:
+        username, password = ask_login(username)
 
-    client = qbittorrentapi.Client(
-        host=args.host, port=args.port, username=args.username, password=password
-    )
-    try:
-        client.auth_log_in()
-    except qbittorrentapi.LoginFailed as e:
-        print(f"ERROR: login failed: {e}")
-        sys.exit(1)
-    except qbittorrentapi.APIConnectionError as e:
-        print(f"ERROR: could not connect to {args.host}:{args.port} -- is the Web UI enabled? ({e})")
-        sys.exit(1)
+    while True:
+        client = qbittorrentapi.Client(
+            host=args.host, port=args.port, username=username, password=password
+        )
+        try:
+            client.auth_log_in()
+            break
+        except qbittorrentapi.LoginFailed as e:
+            if not from_saved:
+                print(f"ERROR: login failed: {e}")
+                sys.exit(1)
+            # The saved login stopped working (e.g. a changed password): ask once more
+            print(f"The login saved in {LOGIN_FILE} was rejected ({e}). Please enter it again.")
+            username, password = ask_login(username)
+            from_saved, typed = False, True
+        except qbittorrentapi.APIConnectionError as e:
+            print(f"ERROR: could not connect to {args.host}:{args.port} -- is the Web UI enabled? ({e})")
+            sys.exit(1)
+
+    if typed:
+        save_login(username, password)
+        print(f"Login saved to {LOGIN_FILE} for the next runs.\n")
 
     print(f"=== qBittorrent relink ({'APPLY' if args.apply else 'DRY-RUN'}) ===")
     print(f"Movies dir : {movies_dir}")
